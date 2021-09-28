@@ -5,9 +5,9 @@ VisualStudioVersion = 16.0.31025.194
 MinimumVisualStudioVersion = 10.0.40219.1
 Project("{8BC9CEB8-8B4A-11D0-8D11-00A0C91BC942}") = "example", "example\example.vcxproj", "{2226DB5F-4E89-48C0-8A1F-6F90641D0437}"
 EndProject
-Project("{2150E333-8FDC-42A3-9474-1A3956D46DE8}") = "Solution Items", "Solution Items", "{F91184A1-85A2-45E7-8A81-F96EFEB32E98}"
+Project("{2150E333-8FDC-42A3-9474-1A3956D46DE8}") = "Solution Items", "Solution Items", "{6C77F3ED-3DA2-44A4-8F42-0C97733151CD}"
 	ProjectSection(SolutionItems) = preProject
-		..\data\shader\billboard_shader.hlsl = ..\data\shader\billboard_shader.hlsl
+		..\data\shader\billboard.hlsl = ..\data\shader\billboard.hlsl
 	EndProjectSection
 EndProject
 Global

@@ -2,6 +2,7 @@
 #include "yoshix.h"
 
 #include <math.h>
+#include <iostream>
 
 using namespace gfx;
 
@@ -9,14 +10,21 @@ struct SVertexBuffer
 {
     float m_ViewProjectionMatrix[16];       // Result of view matrix * projection matrix.
     float m_WorldMatrix[16];                // The world matrix to transform a mesh from local space to world space.
-    float m_ScreenMatrix[16];               // A special view projection matrix to project a rectangular mesh onto a complete render target.
+    float m_WSEyePosition[3];
+    float m_EyeDummy;
+    float m_WSLightPosition[3];
+    float m_LightDummy;
 };
 
 // -----------------------------------------------------------------------------
 
 struct SPixelBuffer
 {
-    float m_NearFar[4];                     // Near and far distance of the view frustum, the other two components are wasted.
+    float m_AmbientLightColor[4];
+    float m_DiffuseLightColor[4];
+    float m_SpecularColor[4];
+    float m_SpecularExponent;
+    float m_SpecularDummy[3];
 };
 
 // -----------------------------------------------------------------------------
@@ -30,38 +38,21 @@ class CApplication : public IApplication
 
     private:
 
-        float   m_Near;                     // Near distance of the view frustum.
-        float   m_Far;                      // Far distance of the view frustum-
         float   m_FieldOfViewY;             // Vertical view angle of the camera
-
-        float   m_AngleY;                   // The rotation angle of the mesh around the y-axis.
-
         float   m_ViewMatrix[16];           // The view matrix to transform a mesh from world space into view space.
         float   m_ProjectionMatrix[16];     // The projection matrix to transform a mesh from view space into clip space.
 
-        BHandle m_pDepthTarget;             // The depth render target of the GBuffer.
-        BHandle m_pNormalTarget;            // The normal render target of the GBuffer.
+        BHandle m_pVertexConstantBuffer;    // A pointer to a YoshiX constant buffer, which defines global data for a vertex shader.
+        BHandle m_pPixelConstantBuffer;
 
-        BHandle m_pColorTarget;             // An extra color render target to render the scene into.
+        BHandle m_pColorTexture;            // A pointer to a YoshiX texture, which is part of the material covering the mesh.
+        BHandle m_pNormalTexture;
 
-        BHandle m_pVertexConstantBuffer;    // A vertex constant buffer to pass the matrices to the vertex shader.
-        BHandle m_pPixelConstantBuffer;     // A pixel constant buffer to pass near and far view distance to the pixel shader.
+        BHandle m_pVertexShader;            // A pointer to a YoshiX vertex shader, which processes each single vertex of the mesh.
+        BHandle m_pPixelShader;             // A pointer to a YoshiX pixel shader, which computes the color of each pixel visible of the mesh on the screen.
 
-        BHandle m_pGBufferVertexShader;     // A vertex shader to write depth and normal into the GBuffer.
-        BHandle m_pGBufferPixelShader;      // A pixel shader to write depth and normal into the GBuffer.
-        BHandle m_pGBufferMaterial;         // A material which uses the GBuffer vertex and pixel shader to fill the GBuffer.
-        BHandle m_pGBufferMesh;             // The cube with GBuffer material.
-
-        BHandle m_pTexture;                 // A texture to cover the cube.
-        BHandle m_pVertexShader;            // A vertex shader to draw the textured cube.
-        BHandle m_pPixelShader;             // A pixel shader to draw the textured cube.
-        BHandle m_pMaterial;                // A material which uses the standard vertex and pixel shader to draw the cube.
-        BHandle m_pMesh;                    // The cube with standard material.
-
-        BHandle m_pPostVertexShader;        // A vertex shader to project a rectangular mesh onto the frame buffer.
-        BHandle m_pPostPixelShader;         // A pixel shader to calculate the post effect.
-        BHandle m_pPostMaterial;            // A material using the post effect shader.
-        BHandle m_pPostMesh;                // A single quad.
+        BHandle m_pMaterial;                // A pointer to a YoshiX material, spawning the surface of the mesh.
+        BHandle m_pMesh;                    // A pointer to a YoshiX mesh, which represents a single triangle.
 
     private:
 
@@ -77,34 +68,28 @@ class CApplication : public IApplication
         virtual bool InternOnReleaseMeshes();
         virtual bool InternOnResize(int _Width, int _Height);
         virtual bool InternOnUpdate();
+        virtual bool InternOnKeyEvent(unsigned int _Key, bool _IsKeyDown, bool _IsAltDown);
         virtual bool InternOnFrame();
+
+    private:
+
+        float cameraPosX = 0.0f;
+        float cameraPosZ = 0.0f;
+        float cameraAngle = 0.0f;
+        float cameraDistance = 8.0f;
 };
 
 // -----------------------------------------------------------------------------
 
 CApplication::CApplication()
-    : m_Near                 (0.1f)
-    , m_Far                  (20.0f)
-    , m_FieldOfViewY         (60.0f)
-    , m_AngleY               (0.0f)
-    , m_pDepthTarget         (nullptr)
-    , m_pNormalTarget        (nullptr)
-    , m_pColorTarget         (nullptr)
-    , m_pVertexConstantBuffer(nullptr)
-    , m_pPixelConstantBuffer (nullptr)
-    , m_pGBufferVertexShader (nullptr)
-    , m_pGBufferPixelShader  (nullptr)
-    , m_pGBufferMaterial     (nullptr)
-    , m_pGBufferMesh         (nullptr)
-    , m_pPostVertexShader    (nullptr)
-    , m_pPostPixelShader     (nullptr)
-    , m_pPostMaterial        (nullptr)
-    , m_pPostMesh            (nullptr)
-    , m_pTexture             (nullptr)
-    , m_pVertexShader        (nullptr)
-    , m_pPixelShader         (nullptr)
-    , m_pMaterial            (nullptr)
-    , m_pMesh                (nullptr)
+    : m_FieldOfViewY            (60.0f)        // Set the vertical view angle of the camera to 60 degrees.
+    , m_pVertexConstantBuffer   (nullptr)
+    , m_pPixelConstantBuffer    (nullptr)
+    , m_pColorTexture           (nullptr)
+    , m_pNormalTexture          (nullptr)
+    , m_pVertexShader           (nullptr)
+    , m_pPixelShader            (nullptr)
+    , m_pMaterial               (nullptr)
 {
 }
 
@@ -119,15 +104,11 @@ CApplication::~CApplication()
 bool CApplication::InternOnCreateTextures()
 {
     // -----------------------------------------------------------------------------
-    // Create the render targets. We need two render targets for the GBuffer (depth
-    // and normal) and one extra color render target. The last one is necessary
-    // because we cannot pass the frame buffer as a texture to a pixel shader.
+    // Load an image from the given path and create a YoshiX texture representing
+    // the image.
     // -----------------------------------------------------------------------------
-    CreateDepthTarget(&m_pDepthTarget);
-    CreateColorTarget(&m_pNormalTarget);
-    CreateColorTarget(&m_pColorTarget);
-
-    CreateTexture("..\\data\\images\\cube.dds", &m_pTexture);
+    CreateTexture("..\\data\\images\\wall_color_map.dds", &m_pColorTexture);
+    CreateTexture("..\\data\\images\\wall_normal_map.dds", &m_pNormalTexture);
 
     return true;
 }
@@ -136,10 +117,11 @@ bool CApplication::InternOnCreateTextures()
 
 bool CApplication::InternOnReleaseTextures()
 {
-    ReleaseTexture(m_pDepthTarget);
-    ReleaseTexture(m_pNormalTarget);
-    ReleaseTexture(m_pColorTarget);
-    ReleaseTexture(m_pTexture);
+    // -----------------------------------------------------------------------------
+    // Important to release the texture again when the application is shut down.
+    // -----------------------------------------------------------------------------
+    ReleaseTexture(m_pColorTexture);
+    ReleaseTexture(m_pNormalTexture);
 
     return true;
 }
@@ -148,8 +130,16 @@ bool CApplication::InternOnReleaseTextures()
 
 bool CApplication::InternOnCreateConstantBuffers()
 {
+    // -----------------------------------------------------------------------------
+    // Create a constant buffer with global data for the vertex shader. We use this
+    // buffer to upload the data defined in the 'SVertexBuffer' struct. Note that it
+    // is not possible to use the data of a constant buffer in vertex and pixel
+    // shader. Constant buffers are specific to a certain shader stage. If a 
+    // constant buffer is a vertex or a pixel buffer is defined in the material info
+    // when creating the material.
+    // -----------------------------------------------------------------------------
     CreateConstantBuffer(sizeof(SVertexBuffer), &m_pVertexConstantBuffer);
-    CreateConstantBuffer(sizeof(SPixelBuffer ), &m_pPixelConstantBuffer);
+    CreateConstantBuffer(sizeof(SPixelBuffer), &m_pPixelConstantBuffer);
 
     return true;
 }
@@ -158,6 +148,9 @@ bool CApplication::InternOnCreateConstantBuffers()
 
 bool CApplication::InternOnReleaseConstantBuffers()
 {
+    // -----------------------------------------------------------------------------
+    // Important to release the buffer again when the application is shut down.
+    // -----------------------------------------------------------------------------
     ReleaseConstantBuffer(m_pVertexConstantBuffer);
     ReleaseConstantBuffer(m_pPixelConstantBuffer);
 
@@ -168,12 +161,11 @@ bool CApplication::InternOnReleaseConstantBuffers()
 
 bool CApplication::InternOnCreateShader()
 {
-    CreateVertexShader("..\\data\\shader\\post_effect.fx", "VSGBufferShader", &m_pGBufferVertexShader);
-    CreatePixelShader ("..\\data\\shader\\post_effect.fx", "PSGBufferShader", &m_pGBufferPixelShader);
-    CreateVertexShader("..\\data\\shader\\post_effect.fx", "VSShader"       , &m_pVertexShader);
-    CreatePixelShader ("..\\data\\shader\\post_effect.fx", "PSShader"       , &m_pPixelShader);
-    CreateVertexShader("..\\data\\shader\\post_effect.fx", "VSPostShader"   , &m_pPostVertexShader);
-    CreatePixelShader ("..\\data\\shader\\post_effect.fx", "PSPostShader"   , &m_pPostPixelShader);
+    // -----------------------------------------------------------------------------
+    // Load and compile the shader programs.
+    // -----------------------------------------------------------------------------
+    CreateVertexShader("..\\data\\shader\\billboard.hlsl", "VSShader", &m_pVertexShader);
+    CreatePixelShader("..\\data\\shader\\billboard.hlsl", "PSShader", &m_pPixelShader);
 
     return true;
 }
@@ -182,12 +174,8 @@ bool CApplication::InternOnCreateShader()
 
 bool CApplication::InternOnReleaseShader()
 {
-    ReleaseVertexShader(m_pGBufferVertexShader);
-    ReleasePixelShader (m_pGBufferPixelShader);
     ReleaseVertexShader(m_pVertexShader);
     ReleasePixelShader (m_pPixelShader);
-    ReleaseVertexShader(m_pPostVertexShader);
-    ReleasePixelShader (m_pPostPixelShader);
 
     return true;
 }
@@ -196,70 +184,39 @@ bool CApplication::InternOnReleaseShader()
 
 bool CApplication::InternOnCreateMaterials()
 {
+    // -----------------------------------------------------------------------------
+    // Create a material spawning the mesh. Note that you can use the same material
+    // for multiple meshes as long as the input layout of the vertex shader matches
+    // the vertex layout of the mesh.
+    // -----------------------------------------------------------------------------
     SMaterialInfo MaterialInfo;
 
-    // -----------------------------------------------------------------------------
-    // Material to render the cube into the GBuffer. The texture coordinates are not
-    // used in the GBuffer shader but we do not want to model the cube twice with
-    // different vertex layouts.
-    // -----------------------------------------------------------------------------
-    MaterialInfo.m_NumberOfTextures              = 0;
-    MaterialInfo.m_NumberOfVertexConstantBuffers = 1;
-    MaterialInfo.m_pVertexConstantBuffers[0]     = m_pVertexConstantBuffer;
-    MaterialInfo.m_NumberOfPixelConstantBuffers  = 0;
-    MaterialInfo.m_pVertexShader                 = m_pGBufferVertexShader;
-    MaterialInfo.m_pPixelShader                  = m_pGBufferPixelShader;
-    MaterialInfo.m_NumberOfInputElements         = 3;
-    MaterialInfo.m_InputElements[0].m_pName      = "POSITION"; 
-    MaterialInfo.m_InputElements[0].m_Type       = SInputElement::Float3;
-    MaterialInfo.m_InputElements[1].m_pName      = "NORMAL";   
-    MaterialInfo.m_InputElements[1].m_Type       = SInputElement::Float3;
-    MaterialInfo.m_InputElements[2].m_pName      = "TEXCOORD"; 
-    MaterialInfo.m_InputElements[2].m_Type       = SInputElement::Float2;
+    MaterialInfo.m_NumberOfTextures                 = 2;                       // We sample one texture in the pixel shader.
+    MaterialInfo.m_pTextures[0]                     = m_pColorTexture;         // The handle to the texture.
+    MaterialInfo.m_pTextures[1]                     = m_pNormalTexture;
 
-    CreateMaterial(MaterialInfo, &m_pGBufferMaterial);
+    MaterialInfo.m_NumberOfVertexConstantBuffers    = 1;                       // We need one vertex constant buffer to pass world matrix and view projection matrix to the vertex shader.
+    MaterialInfo.m_pVertexConstantBuffers[0]        = m_pVertexConstantBuffer; // Pass the handle to the created vertex constant buffer.
 
-    // -----------------------------------------------------------------------------
-    // Standard material to render the cube into a color target.
-    // -----------------------------------------------------------------------------
-    MaterialInfo.m_NumberOfTextures              = 1;
-    MaterialInfo.m_pTextures[0]                  = m_pTexture;
-    MaterialInfo.m_NumberOfVertexConstantBuffers = 1;
-    MaterialInfo.m_pVertexConstantBuffers[0]     = m_pVertexConstantBuffer;
-    MaterialInfo.m_NumberOfPixelConstantBuffers  = 0;
-    MaterialInfo.m_pVertexShader                 = m_pVertexShader;
-    MaterialInfo.m_pPixelShader                  = m_pPixelShader;
-    MaterialInfo.m_NumberOfInputElements         = 3;
-    MaterialInfo.m_InputElements[0].m_pName      = "POSITION"; 
-    MaterialInfo.m_InputElements[0].m_Type       = SInputElement::Float3;
-    MaterialInfo.m_InputElements[1].m_pName      = "NORMAL";   
-    MaterialInfo.m_InputElements[1].m_Type       = SInputElement::Float3;
-    MaterialInfo.m_InputElements[2].m_pName      = "TEXCOORD"; 
-    MaterialInfo.m_InputElements[2].m_Type       = SInputElement::Float2;
+    MaterialInfo.m_NumberOfPixelConstantBuffers     = 1;                       // We do not need any global data in the pixel shader.
+    MaterialInfo.m_pPixelConstantBuffers[0]         = m_pPixelConstantBuffer;
+
+    MaterialInfo.m_pVertexShader                    = m_pVertexShader;         // The handle to the vertex shader.
+    MaterialInfo.m_pPixelShader                     = m_pPixelShader;          // The handle to the pixel shader.
+
+    MaterialInfo.m_NumberOfInputElements            = 5;                       // The vertex shader requests the position and the texture coordinates as arguments.
+    MaterialInfo.m_InputElements[0].m_pName         = "POSITION";              // The semantic name of the first argument, which matches exactly the first identifier in the 'VSInput' struct.
+    MaterialInfo.m_InputElements[0].m_Type          = SInputElement::Float3;   // The position is a 3D vector with floating points.
+    MaterialInfo.m_InputElements[1].m_pName         = "TANGENT";
+    MaterialInfo.m_InputElements[1].m_Type          = SInputElement::Float3;
+    MaterialInfo.m_InputElements[2].m_pName         = "BINORMAL";
+    MaterialInfo.m_InputElements[2].m_Type          = SInputElement::Float3;
+    MaterialInfo.m_InputElements[3].m_pName         = "NORMAL";
+    MaterialInfo.m_InputElements[3].m_Type          = SInputElement::Float3;
+    MaterialInfo.m_InputElements[4].m_pName         = "TEXCOORD";
+    MaterialInfo.m_InputElements[4].m_Type          = SInputElement::Float2;   // The texture coordinates are a 2D vector with floating points.
 
     CreateMaterial(MaterialInfo, &m_pMaterial);
-
-    // -----------------------------------------------------------------------------
-    // Material to render the post effect. Note that this material has the three
-    // render targets as texture input. The pixel shader of the post effect is able
-    // to use the depth and normals of the GBuffer and also the final color image of
-    // the rendered scene.
-    // -----------------------------------------------------------------------------
-    MaterialInfo.m_NumberOfTextures              = 3;
-    MaterialInfo.m_pTextures[0]                  = m_pDepthTarget;
-    MaterialInfo.m_pTextures[1]                  = m_pColorTarget;
-    MaterialInfo.m_pTextures[2]                  = m_pNormalTarget;
-    MaterialInfo.m_NumberOfVertexConstantBuffers = 1;
-    MaterialInfo.m_pVertexConstantBuffers[0]     = m_pVertexConstantBuffer;
-    MaterialInfo.m_NumberOfPixelConstantBuffers  = 1;
-    MaterialInfo.m_pPixelConstantBuffers[0]      = m_pPixelConstantBuffer;
-    MaterialInfo.m_pVertexShader                 = m_pPostVertexShader;
-    MaterialInfo.m_pPixelShader                  = m_pPostPixelShader;
-    MaterialInfo.m_NumberOfInputElements         = 1;
-    MaterialInfo.m_InputElements[0].m_pName      = "POSITION"; 
-    MaterialInfo.m_InputElements[0].m_Type       = SInputElement::Float3;
-
-    CreateMaterial(MaterialInfo, &m_pPostMaterial);
 
     return true;
 }
@@ -268,9 +225,10 @@ bool CApplication::InternOnCreateMaterials()
 
 bool CApplication::InternOnReleaseMaterials()
 {
-    ReleaseMaterial(m_pGBufferMaterial);
+    // -----------------------------------------------------------------------------
+    // Important to release the material again when the application is shut down.
+    // -----------------------------------------------------------------------------
     ReleaseMaterial(m_pMaterial);
-    ReleaseMaterial(m_pPostMaterial);
 
     return true;
 }
@@ -280,131 +238,50 @@ bool CApplication::InternOnReleaseMaterials()
 bool CApplication::InternOnCreateMeshes()
 {
     // -----------------------------------------------------------------------------
-    // The cube as interleaved array with position, normal, and texture coordinates.
+    // Define the vertices of the mesh. Note that we define the complete data of one
+    // vertex in one piece, so no separate arrays for position, normals, ... This
+    // technique is called 'interleaved storage'. The vertex layout here consists of
+    // two elements, namely the position (3D) and the texture coordinates (2D). This
+    // matches the definition of the input elements in the material info and also
+    // the members of the 'VSInput' struct in the 'textured.fx' file.
     // -----------------------------------------------------------------------------
-    const float HalfEdgeLength = 2.0f;
-
-    float U[] =
+    float QuadVertices[][14] =
     {
-        0.0f / 4.0f,
-        1.0f / 4.0f,
-        2.0f / 4.0f,
-        3.0f / 4.0f,
-        4.0f / 4.0f,
-    };
-
-    float V[] =
-    {
-        3.0f / 3.0f,
-        2.0f / 3.0f,
-        1.0f / 3.0f,
-        0.0f / 3.0f,
-    };
-
-    float CubeVertices[][8] =
-    {
-        { -HalfEdgeLength, -HalfEdgeLength, -HalfEdgeLength,  0.0f,  0.0f, -1.0f, U[1], V[1], },
-        {  HalfEdgeLength, -HalfEdgeLength, -HalfEdgeLength,  0.0f,  0.0f, -1.0f, U[2], V[1], },
-        {  HalfEdgeLength,  HalfEdgeLength, -HalfEdgeLength,  0.0f,  0.0f, -1.0f, U[2], V[2], },
-        { -HalfEdgeLength,  HalfEdgeLength, -HalfEdgeLength,  0.0f,  0.0f, -1.0f, U[1], V[2], },
-                                                                                                        
-        {  HalfEdgeLength, -HalfEdgeLength, -HalfEdgeLength,  1.0f,  0.0f,  0.0f, U[2], V[1], },
-        {  HalfEdgeLength, -HalfEdgeLength,  HalfEdgeLength,  1.0f,  0.0f,  0.0f, U[3], V[1], },
-        {  HalfEdgeLength,  HalfEdgeLength,  HalfEdgeLength,  1.0f,  0.0f,  0.0f, U[3], V[2], },
-        {  HalfEdgeLength,  HalfEdgeLength, -HalfEdgeLength,  1.0f,  0.0f,  0.0f, U[2], V[2], },
-                                                                                                        
-        {  HalfEdgeLength, -HalfEdgeLength,  HalfEdgeLength,  0.0f,  0.0f,  1.0f, U[3], V[1], },
-        { -HalfEdgeLength, -HalfEdgeLength,  HalfEdgeLength,  0.0f,  0.0f,  1.0f, U[4], V[1], },
-        { -HalfEdgeLength,  HalfEdgeLength,  HalfEdgeLength,  0.0f,  0.0f,  1.0f, U[4], V[2], },
-        {  HalfEdgeLength,  HalfEdgeLength,  HalfEdgeLength,  0.0f,  0.0f,  1.0f, U[3], V[2], },
-                                                                                                       
-        { -HalfEdgeLength, -HalfEdgeLength,  HalfEdgeLength, -1.0f,  0.0f,  0.0f, U[0], V[1], },
-        { -HalfEdgeLength, -HalfEdgeLength, -HalfEdgeLength, -1.0f,  0.0f,  0.0f, U[1], V[1], },
-        { -HalfEdgeLength,  HalfEdgeLength, -HalfEdgeLength, -1.0f,  0.0f,  0.0f, U[1], V[2], },
-        { -HalfEdgeLength,  HalfEdgeLength,  HalfEdgeLength, -1.0f,  0.0f,  0.0f, U[0], V[2], },
-                                                                                                       
-        { -HalfEdgeLength,  HalfEdgeLength, -HalfEdgeLength,  0.0f,  1.0f,  0.0f, U[1], V[2], },
-        {  HalfEdgeLength,  HalfEdgeLength, -HalfEdgeLength,  0.0f,  1.0f,  0.0f, U[2], V[2], },
-        {  HalfEdgeLength,  HalfEdgeLength,  HalfEdgeLength,  0.0f,  1.0f,  0.0f, U[2], V[3], },
-        { -HalfEdgeLength,  HalfEdgeLength,  HalfEdgeLength,  0.0f,  1.0f,  0.0f, U[1], V[3], },
-                                                                                                        
-        { -HalfEdgeLength, -HalfEdgeLength,  HalfEdgeLength,  0.0f, -1.0f,  0.0f, U[1], V[0], },
-        {  HalfEdgeLength, -HalfEdgeLength,  HalfEdgeLength,  0.0f, -1.0f,  0.0f, U[2], V[0], },
-        {  HalfEdgeLength, -HalfEdgeLength, -HalfEdgeLength,  0.0f, -1.0f,  0.0f, U[2], V[1], },
-        { -HalfEdgeLength, -HalfEdgeLength, -HalfEdgeLength,  0.0f, -1.0f,  0.0f, U[1], V[1], },
-    };
-
-    int CubeIndices[][3] =
-    {
-        {  0,  1,  2, },
-        {  0,  2,  3, },
-
-        {  4,  5,  6, },
-        {  4,  6,  7, },
-
-        {  8,  9, 10, },
-        {  8, 10, 11, },
-
-        { 12, 13, 14, },
-        { 12, 14, 15, },
-
-        { 16, 17, 18, },
-        { 16, 18, 19, },
-
-        { 20, 21, 22, },
-        { 20, 22, 23, },
+        { -2.0f, -2.0f, 0.0f, 1.0f, 0.0f, 0.0f, 0.0f, 1.0f, 0.0f, 0.0f, 0.0f, -1.0f, 0.0f, 1.0f },
+        {  2.0f, -2.0f, 0.0f, 1.0f, 0.0f, 0.0f, 0.0f, 1.0f, 0.0f, 0.0f, 0.0f, -1.0f, 1.0f, 1.0f },
+        {  2.0f,  2.0f, 0.0f, 1.0f, 0.0f, 0.0f, 0.0f, 1.0f, 0.0f, 0.0f, 0.0f, -1.0f, 1.0f, 0.0f },
+        { -2.0f,  2.0f, 0.0f, 1.0f, 0.0f, 0.0f, 0.0f, 1.0f, 0.0f, 0.0f, 0.0f, -1.0f, 0.0f, 0.0f },
     };
 
     // -----------------------------------------------------------------------------
-    // The rectangular mesh to render the post effect. Note that we can use the
-    // passed positions as texture coordinates to sample the passed full screen
-    // input textures.
+    // Define the topology of the mesh via indices. An index addresses a vertex from
+    // the array above. Three indices represent one triangle. When defining the 
+    // triangles of a mesh imagine that you are standing in front of the triangle 
+    // and looking to the center of the triangle. If the mesh represents a closed
+    // body such as a cube, your view position has to be outside of the body. Now
+    // define the indices of the addressed vertices of the triangle in counter-
+    // clockwise order.
     // -----------------------------------------------------------------------------
-    float QuadVertices[][3] =
-    {
-        { 0.0f, 1.0f, 0.0f, },
-        { 1.0f, 1.0f, 0.0f, },
-        { 1.0f, 0.0f, 0.0f, },
-        { 0.0f, 0.0f, 0.0f, },
-    };
-
     int QuadIndices[][3] =
     {
-        { 0, 1, 2, },
         { 0, 2, 3, },
+        { 0, 1, 2, },
     };
 
     // -----------------------------------------------------------------------------
-    // The cube mesh with GBuffer and standard material.
+    // Define the mesh and its material. The material defines the look of the 
+    // surface covering the mesh. Note that you pass the number of indices and not
+    // the number of triangles.
     // -----------------------------------------------------------------------------
     SMeshInfo MeshInfo;
 
-    MeshInfo.m_pVertices        = &CubeVertices[0][0];
-    MeshInfo.m_NumberOfVertices = 24;
-    MeshInfo.m_pIndices         = &CubeIndices[0][0];
-    MeshInfo.m_NumberOfIndices  = 36;
-    MeshInfo.m_pMaterial        = m_pGBufferMaterial;
-
-    CreateMesh(MeshInfo, &m_pGBufferMesh);
-
-    MeshInfo.m_pVertices        = &CubeVertices[0][0];
-    MeshInfo.m_NumberOfVertices = 24;
-    MeshInfo.m_pIndices         = &CubeIndices[0][0];
-    MeshInfo.m_NumberOfIndices  = 36;
-    MeshInfo.m_pMaterial        = m_pMaterial;
+    MeshInfo.m_pVertices        = &QuadVertices[0][0];      // Pointer to the first float of the first vertex.
+    MeshInfo.m_NumberOfVertices = 4;                        // The number of vertices.
+    MeshInfo.m_pIndices         = &QuadIndices[0][0];       // Pointer to the first index.
+    MeshInfo.m_NumberOfIndices  = 6;                        // The number of indices (has to be dividable by 3).
+    MeshInfo.m_pMaterial        = m_pMaterial;              // A handle to the material covering the mesh.
 
     CreateMesh(MeshInfo, &m_pMesh);
-
-    // -----------------------------------------------------------------------------
-    // The quad mesh with the post effect material.
-    // -----------------------------------------------------------------------------
-    MeshInfo.m_pVertices        = &QuadVertices[0][0];
-    MeshInfo.m_NumberOfVertices = 4;
-    MeshInfo.m_pIndices         = &QuadIndices[0][0];
-    MeshInfo.m_NumberOfIndices  = 6;
-    MeshInfo.m_pMaterial        = m_pPostMaterial;
-
-    CreateMesh(MeshInfo, &m_pPostMesh);
 
     return true;
 }
@@ -413,9 +290,10 @@ bool CApplication::InternOnCreateMeshes()
 
 bool CApplication::InternOnReleaseMeshes()
 {
-    ReleaseMesh(m_pGBufferMesh);
+    // -----------------------------------------------------------------------------
+    // Important to release the mesh again when the application is shut down.
+    // -----------------------------------------------------------------------------
     ReleaseMesh(m_pMesh);
-    ReleaseMesh(m_pPostMesh);
 
     return true;
 }
@@ -424,7 +302,15 @@ bool CApplication::InternOnReleaseMeshes()
 
 bool CApplication::InternOnResize(int _Width, int _Height)
 {
-    GetProjectionMatrix(m_FieldOfViewY, static_cast<float>(_Width) / static_cast<float>(_Height), m_Near, m_Far, m_ProjectionMatrix);
+    // -----------------------------------------------------------------------------
+    // The projection matrix defines the size of the camera frustum. The YoshiX
+    // camera has the shape of a pyramid with the eye position at the top of the
+    // pyramid. The horizontal view angle is defined by the vertical view angle
+    // and the ratio between window width and window height. Note that we do not
+    // set the projection matrix to YoshiX. Instead we store the projection matrix
+    // as a member and upload it in the 'InternOnFrame' method in a constant buffer.
+    // -----------------------------------------------------------------------------
+    GetProjectionMatrix(m_FieldOfViewY, static_cast<float>(_Width) / static_cast<float>(_Height), 0.1f, 100.0f, m_ProjectionMatrix);
 
     return true;
 }
@@ -434,12 +320,18 @@ bool CApplication::InternOnResize(int _Width, int _Height)
 bool CApplication::InternOnUpdate()
 {
     float Eye[3];
-    float At [3];
-    float Up [3];
+    float At[3];
+    float Up[3];
 
-    Eye[0] =  0.0f; At[0] = 0.0f; Up[0] = 0.0f;
-    Eye[1] =  4.0f; At[1] = 0.0f; Up[1] = 1.0f;
-    Eye[2] = -8.0f; At[2] = 0.0f; Up[2] = 0.0f;
+    // -----------------------------------------------------------------------------
+    // Define position and orientation of the camera in the world. The result is
+    // stored in the 'm_ViewMatrix' matrix and uploaded in the 'InternOnFrame'
+    // method.
+    // -----------------------------------------------------------------------------
+
+    Eye[0] = cameraPosX; At[0] = 0.0f; Up[0] = 0.0f;
+    Eye[1] = 0.0f;       At[1] = 0.0f; Up[1] = 1.0f;
+    Eye[2] = cameraPosZ; At[2] = 0.0f; Up[2] = 0.0f;
 
     GetViewMatrix(Eye, At, Up, m_ViewMatrix);
 
@@ -448,84 +340,79 @@ bool CApplication::InternOnUpdate()
 
 // -----------------------------------------------------------------------------
 
+bool CApplication::InternOnKeyEvent(unsigned int _Key, bool _IsKeyDown, bool _IsAltDown) 
+{
+    // -----------------------------------------------------------------------------
+    // Rotate camera to the left or to the right
+    // Key A = Rotate to the left
+    // Key D = Rotate to the right
+    // -----------------------------------------------------------------------------
+    if (_Key == 'A')
+    {
+        cameraAngle += 0.04f;
+    }
+
+    if (_Key == 'D')
+    {
+        cameraAngle -= 0.04f;
+    }
+
+    return true;
+}
+
+// -----------------------------------------------------------------------------
+
 bool CApplication::InternOnFrame()
 {
-    float ClearColor[4] = { 0.0f, 0.0f, 0.0f, 1.0f, };
-
     // -----------------------------------------------------------------------------
-    // Upload the matrices to the vertex shader.
+    // Upload the world matrix and the view projection matrix to the GPU. This has
+    // to be done before drawing the mesh, though not necessarily in this method.
     // -----------------------------------------------------------------------------
     SVertexBuffer VertexBuffer;
 
+    GetIdentityMatrix(VertexBuffer.m_WorldMatrix);
+
     MulMatrix(m_ViewMatrix, m_ProjectionMatrix, VertexBuffer.m_ViewProjectionMatrix);
 
-    GetRotationYMatrix(m_AngleY, VertexBuffer.m_WorldMatrix);
+    cameraPosX = cameraDistance * cos(cameraAngle);
+    cameraPosZ = cameraDistance * sin(cameraAngle);
 
-    GetScreenMatrix(VertexBuffer.m_ScreenMatrix);
+    VertexBuffer.m_WSEyePosition[0] = cameraPosX;
+    VertexBuffer.m_WSEyePosition[1] = 0.0f;
+    VertexBuffer.m_WSEyePosition[2] = cameraPosZ;
+
+    VertexBuffer.m_WSLightPosition[0] = 5.0f;
+    VertexBuffer.m_WSLightPosition[1] = 5.0f;
+    VertexBuffer.m_WSLightPosition[2] = -20.0f;
 
     UploadConstantBuffer(&VertexBuffer, m_pVertexConstantBuffer);
 
-    // -----------------------------------------------------------------------------
-    // Upload the near and far distance to the pixel shader.
-    // -----------------------------------------------------------------------------
     SPixelBuffer PixelBuffer;
 
-    PixelBuffer.m_NearFar[0] = m_Near;
-    PixelBuffer.m_NearFar[1] = m_Far;
-    PixelBuffer.m_NearFar[2] = 0.0f;
-    PixelBuffer.m_NearFar[3] = 0.0f;
+    PixelBuffer.m_AmbientLightColor[0] = 0.2f;
+    PixelBuffer.m_AmbientLightColor[1] = 0.2f;
+    PixelBuffer.m_AmbientLightColor[2] = 0.2f;
+    PixelBuffer.m_AmbientLightColor[3] = 1.0f;
+
+    PixelBuffer.m_DiffuseLightColor[0] = 0.7f;
+    PixelBuffer.m_DiffuseLightColor[1] = 0.7f;
+    PixelBuffer.m_DiffuseLightColor[2] = 0.7f;
+    PixelBuffer.m_DiffuseLightColor[3] = 1.0f;
+
+    PixelBuffer.m_SpecularColor[0] = 1.0f;
+    PixelBuffer.m_SpecularColor[1] = 1.0f;
+    PixelBuffer.m_SpecularColor[2] = 1.0f;
+    PixelBuffer.m_SpecularColor[3] = 1.0f;
+
+    PixelBuffer.m_SpecularExponent = 100.0f;
 
     UploadConstantBuffer(&PixelBuffer, m_pPixelConstantBuffer);
 
     // -----------------------------------------------------------------------------
-    // Activate the GBuffer and render depth and normals of the cube to it.
+    // Draw the mesh. This will activate the shader, constant buffers, and textures
+    // of the material on the GPU and render the mesh to the current render targets.
     // -----------------------------------------------------------------------------
-    SetRenderTargets(&m_pNormalTarget, 1, m_pDepthTarget);
-
-    ClearDepthTarget(m_pDepthTarget, 1.0f);
-    ClearColorTarget(m_pNormalTarget, ClearColor);
-
-    DrawMesh(m_pGBufferMesh);
-
-    // -----------------------------------------------------------------------------
-    // Draw the cube with standard materials into the color target. Note that we set
-    // the depth buffer of the GBuffer as depth buffer, which is already filled with
-    // the depth values of the GBuffer pass. So each pixel of the scene which is
-    // more or equal distant than the pixel in the depth buffer is discarded. For
-    // that reason we switch the depth test to equal, so at least the pixel with an
-    // equal distance pass the test. These are exactly the same pixels which won in
-    // the GBuffer pass.
-    // -----------------------------------------------------------------------------
-    SetRenderTargets(&m_pColorTarget, 1, m_pDepthTarget);
-    
-    ClearColorTarget(m_pColorTarget, ClearColor);
-
-    SetDepthTest(SDepthTest::Equal);
-
     DrawMesh(m_pMesh);
-
-    // -----------------------------------------------------------------------------
-    // We now set the default frame and depth buffer, because the default frame
-    // buffer is the only one, which is visible on the screen. Therefore we have to
-    // render the final pass to this frame buffer to see anything on the screen.
-    // Note that in this way the depth, normal, and color target are deactivated.
-    // This is necessary, because we want to use these targets now as input textures
-    // of the post effect. WHen rendering a post effect it is important to switch
-    // off the depth test, because we want to calculate each pixel of the screen
-    // under all circumstances.
-    // -----------------------------------------------------------------------------
-    ResetRenderTargets();
-
-    SetDepthTest(SDepthTest::Off);
-
-    DrawMesh(m_pPostMesh);
-
-    // -----------------------------------------------------------------------------
-    // We are done with the post effect so set the depth test to its default again.
-    // -----------------------------------------------------------------------------
-    SetDepthTest(SDepthTest::Lesser);
-
-    m_AngleY = ::fmodf(m_AngleY + 0.003f, 360.0f);
 
     return true;
 }
@@ -536,5 +423,5 @@ void main()
 {
     CApplication Application;
 
-    RunApplication(800, 600, "YoshiX Example", &Application);
+    RunApplication(800, 600, "Billboard", &Application);
 }

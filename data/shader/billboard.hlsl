@@ -62,7 +62,29 @@ PSInput VSShader(VSInput _Input)
 
     Output = (PSInput)0;
 
-    WSPosition          = mul(float4(_Input.m_OSPosition, 1.0f), g_WorldMatrix);
+    float3 xAxis;
+    float3 yAxis;
+    float3 zAxis;
+
+    // The billboard will only be rotated around the y-axis, so the vector will always be 0,1,0
+    yAxis = normalize(float3(0.0f, 1.0f, 0.0f));
+
+    // Get the direction the camera is looking at
+    zAxis = normalize(-g_WSEyePosition);
+
+    // The x-axis is perpendicular to the y-axis and the z-axis, so the cross product of them is needed
+    xAxis = normalize(cross(yAxis, zAxis));
+
+    float3x3 rotationmatrix =
+    {
+        xAxis,
+        yAxis,
+        zAxis
+    };
+
+    float3 transform = mul(_Input.m_OSPosition, rotationmatrix);
+
+    WSPosition          = mul(float4(transform, 1.0f), g_WorldMatrix);
 
     Output.m_CSPosition = mul(WSPosition, g_ViewProjectionMatrix);
     Output.m_WSTangent  = normalize(mul(_Input.m_OSTangent, (float3x3) g_WorldMatrix));

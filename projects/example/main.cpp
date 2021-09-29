@@ -374,6 +374,7 @@ bool CApplication::InternOnFrame()
 
     MulMatrix(m_ViewMatrix, m_ProjectionMatrix, VertexBuffer.m_ViewProjectionMatrix);
 
+    // Update camera position when the camera is rotated
     cameraPosX = cameraDistance * cos(cameraAngle);
     cameraPosZ = cameraDistance * sin(cameraAngle);
 
